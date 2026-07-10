@@ -7,9 +7,43 @@ use rayon::iter::{IntoParallelIterator, ParallelIterator};
 use rayon::prelude::*;
 use std::iter::Iterator;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, RwLock};
 use tqdm::Iter;
 
 static PROGRESS_SUPPRESS_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+/// Observer invoked on each [`NiceProgressBar`] step during model load, with
+/// `(label, position, total)`. A host (e.g. a GUI) registers one via
+/// [`set_load_progress_observer`] to mirror the load bar without the terminal
+/// widget; `silent` suppression of the indicatif draw is independent of this.
+type LoadProgressObserver = Arc<dyn Fn(&str, u64, u64) + Send + Sync>;
+
+static LOAD_PROGRESS_OBSERVER: RwLock<Option<LoadProgressObserver>> = RwLock::new(None);
+
+/// Register the load-progress observer, replacing any previous one.
+pub fn set_load_progress_observer<F>(observer: F)
+where
+    F: Fn(&str, u64, u64) + Send + Sync + 'static,
+{
+    if let Ok(mut slot) = LOAD_PROGRESS_OBSERVER.write() {
+        *slot = Some(Arc::new(observer));
+    }
+}
+
+/// Clear the load-progress observer.
+pub fn clear_load_progress_observer() {
+    if let Ok(mut slot) = LOAD_PROGRESS_OBSERVER.write() {
+        *slot = None;
+    }
+}
+
+fn notify_load_progress(label: &str, position: u64, total: u64) {
+    if let Ok(slot) = LOAD_PROGRESS_OBSERVER.read() {
+        if let Some(observer) = slot.as_ref() {
+            observer(label, position, total);
+        }
+    }
+}
 
 /// RAII guard that suppresses progress bar drawing while it is alive.
 pub struct ProgressScopeGuard {
@@ -80,8 +114,41 @@ pub struct NiceProgressBar<'a, T: ExactSizeIterator, const COLOR: char = 'b'>(
     pub &'a MultiProgress,
 );
 
+/// Drives the indicatif bar AND notifies the global load-progress observer on
+/// each step (label + 1-based position + total), so a host can mirror the load
+/// even when the terminal bar is suppressed.
+pub struct ObservedProgress<T: ExactSizeIterator> {
+    inner: ProgressBarIter<T>,
+    label: &'static str,
+    position: u64,
+    total: u64,
+}
+
+impl<T: ExactSizeIterator> Iterator for ObservedProgress<T> {
+    type Item = T::Item;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let item = self.inner.next();
+        if item.is_some() {
+            self.position += 1;
+            notify_load_progress(self.label, self.position, self.total);
+        }
+        item
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.inner.size_hint()
+    }
+}
+
+impl<T: ExactSizeIterator> ExactSizeIterator for ObservedProgress<T> {
+    fn len(&self) -> usize {
+        self.inner.len()
+    }
+}
+
 impl<T: ExactSizeIterator, const COLOR: char> IntoIterator for NiceProgressBar<'_, T, COLOR> {
-    type IntoIter = ProgressBarIter<T>;
+    type IntoIter = ObservedProgress<T>;
     type Item = T::Item;
 
     fn into_iter(self) -> Self::IntoIter {
@@ -91,7 +158,9 @@ impl<T: ExactSizeIterator, const COLOR: char> IntoIterator for NiceProgressBar<'
             'r' => "red",
             other => panic!("Color char `{other}` not supported"),
         };
-        let bar = ProgressBar::new(self.0.len() as u64);
+        let label = self.1;
+        let total = self.0.len() as u64;
+        let bar = ProgressBar::new(total);
         configure_progress_bar(&bar);
         bar.set_style(
             ProgressStyle::default_bar()
@@ -106,7 +175,12 @@ impl<T: ExactSizeIterator, const COLOR: char> IntoIterator for NiceProgressBar<'
         // Add to the multi progress
         self.2.add(bar.clone());
 
-        self.0.progress_with(bar)
+        ObservedProgress {
+            inner: self.0.progress_with(bar),
+            label,
+            position: 0,
+            total,
+        }
     }
 }
 

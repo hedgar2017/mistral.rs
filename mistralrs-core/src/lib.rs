@@ -199,6 +199,7 @@ pub use utils::debug::{
 pub use utils::memory_usage::MemoryUsage;
 pub use utils::normal::{ModelDType, TryIntoDType};
 pub use utils::{paged_attn_supported, using_flash_attn};
+pub use utils::progress::{clear_load_progress_observer, set_load_progress_observer};
 
 // re-export llguidance for easier LlguidanceGrammar construction
 pub use llguidance;

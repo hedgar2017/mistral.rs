@@ -254,6 +254,7 @@ pub use mistralrs_core::{
     WIRE_EMBED_LIMIT_BYTES,
 };
 pub use mistralrs_core::{CalibrationAction, CalibrationStatus};
+pub use mistralrs_core::{clear_load_progress_observer, set_load_progress_observer};
 pub use mistralrs_core::{
     McpClient, McpClientConfig, McpServerConfig, McpServerSource, McpToolInfo,
 };
